@@ -7,7 +7,7 @@
    Forkserver design by Jann Horn <jannhorn@googlemail.com>
 
    Now maintained by Marc Heuse <mh@mh-sec.de>,
-                        Heiko Eißfeldt <heiko.eissfeldt@hexco.de> and
+                        Heiko Eissfeldt <heiko.eissfeldt@hexco.de> and
                         Andrea Fioraldi <andreafioraldi@gmail.com> and
                         Dominik Maier <mail@dmnk.co>
 
@@ -27,6 +27,9 @@
  */
 
 #include "config.h"
+#ifdef AFL_PERSISTENT_RECORD
+  #include "afl-fuzz.h"
+#endif
 #include "types.h"
 #include "debug.h"
 #include "common.h"
@@ -575,7 +578,8 @@ void afl_fsrv_start(afl_forkserver_t *fsrv, char **argv,
     void *nyx_config = fsrv->nyx_handlers->nyx_config_load(fsrv->target_path);
 
     fsrv->nyx_handlers->nyx_config_set_workdir_path(nyx_config, workdir_path);
-    fsrv->nyx_handlers->nyx_config_set_input_buffer_size(nyx_config, MAX_FILE);
+    fsrv->nyx_handlers->nyx_config_set_input_buffer_size(nyx_config,
+                                                         fsrv->max_length);
     fsrv->nyx_handlers->nyx_config_set_input_buffer_write_protection(nyx_config,
                                                                      true);
 
@@ -1651,7 +1655,8 @@ void afl_fsrv_kill(afl_forkserver_t *fsrv) {
   if (fsrv->fsrv_pid > 0) {
 
     kill(fsrv->fsrv_pid, fsrv->fsrv_kill_signal);
-    waitpid(fsrv->fsrv_pid, NULL, 0);
+    usleep(25);
+    waitpid(fsrv->fsrv_pid, NULL, WNOHANG);
 
   }
 
@@ -2078,10 +2083,13 @@ store_persistent_record: {
     u32 len = fsrv->persistent_record_len[entry];
     if (likely(len && data)) {
 
-      snprintf(fn, sizeof(fn), persistent_out_fmt, fsrv->persistent_record_dir,
-               fsrv->persistent_record_cnt, writecnt++,
-               afl->file_extension ? "." : "",
-               afl->file_extension ? (const char *)afl->file_extension : "");
+      snprintf(
+          fn, sizeof(fn), persistent_out_fmt, fsrv->persistent_record_dir,
+          fsrv->persistent_record_cnt, writecnt++,
+          ((afl_state_t *)(fsrv->afl_ptr))->file_extension ? "." : "",
+          ((afl_state_t *)(fsrv->afl_ptr))->file_extension
+              ? (const char *)((afl_state_t *)(fsrv->afl_ptr))->file_extension
+              : "");
       int fd = open(fn, O_CREAT | O_TRUNC | O_WRONLY, 0644);
       if (fd >= 0) {
 

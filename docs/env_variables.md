@@ -381,6 +381,9 @@ checks or alter some of the more exotic semantics of the tool:
   - Setting `AFL_DISABLE_TRIM` tells afl-fuzz not to trim test cases. This is
     usually a bad idea!
 
+  - Setting `AFL_DISABLE_REDUNDANT` disables any queue items that are redundant.
+    This can be useful with huge queues.
+
   - Setting `AFL_KEEP_TIMEOUTS` will keep longer running inputs if they reach
     new coverage
 
@@ -547,6 +550,9 @@ checks or alter some of the more exotic semantics of the tool:
     use a custom afl-qemu-trace or if you need to modify the afl-qemu-trace
     arguments.
 
+  - `AFL_SHA1_FILENAMES` causes AFL++ to generate files named by the SHA1 hash
+    of their contents, rather than use the standard `id:000000,...` names.
+
   - `AFL_SHUFFLE_QUEUE` randomly reorders the input queue on startup. Requested
     by some users for unorthodox parallelized fuzzing setups, but not advisable
     otherwise.
@@ -581,6 +587,9 @@ checks or alter some of the more exotic semantics of the tool:
   - `AFL_SYNC_TIME` allows you to specify a different minimal time (in minutes)
     between fuzzing instances synchronization. Default sync time is 30 minutes,
     note that time is halved for -M main nodes.
+
+  - `AFL_NO_SYNC` disables any syncing whatsoever and takes priority on all
+    other syncing parameters.
 
   - Setting `AFL_TARGET_ENV` causes AFL++ to set extra environment variables for
     the target binary. Example: `AFL_TARGET_ENV="VAR1=1 VAR2='a b c'" afl-fuzz

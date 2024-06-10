@@ -264,6 +264,7 @@ static void usage(u8 *argv0, int more_help) {
       "AFL_CYCLE_SCHEDULES: after completing a cycle, switch to a different -p schedule\n"
       "AFL_DEBUG: extra debugging output for Python mode trimming\n"
       "AFL_DEBUG_CHILD: do not suppress stdout/stderr from target\n"
+      "AFL_DISABLE_REDUNDANT: disable any queue item that is redundant\n"
       "AFL_DISABLE_TRIM: disable the trimming of test cases\n"
       "AFL_DUMB_FORKSRV: use fork server without feedback from target\n"
       "AFL_EXIT_WHEN_DONE: exit when all inputs are run and no new finds are found\n"
@@ -334,6 +335,7 @@ static void usage(u8 *argv0, int more_help) {
       "AFL_STATSD_PORT: change default statsd port (default: 8125)\n"
       "AFL_STATSD_TAGS_FLAVOR: set statsd tags format (default: disable tags)\n"
       "                        suported formats: dogstatsd, librato, signalfx, influxdb\n"
+      "AFL_NO_SYNC: disables all syncing\n"
       "AFL_SYNC_TIME: sync time between fuzzing instances (in minutes)\n"
       "AFL_FINAL_SYNC: sync a final time when exiting (will delay the exit!)\n"
       "AFL_NO_CRASH_README: do not create a README in the crashes directory\n"
@@ -913,8 +915,15 @@ int main(int argc, char **argv_orig, char **envp) {
 
         u8 suffix = 'M';
 
-        if (mem_limit_given) { FATAL("Multiple -m options not supported"); }
-        mem_limit_given = 1;
+        if (mem_limit_given) {
+
+          WARNF("Overriding previous -m option.");
+
+        } else {
+
+          mem_limit_given = 1;
+
+        }
 
         if (!optarg) { FATAL("Wrong usage of -m"); }
 
@@ -1460,15 +1469,16 @@ int main(int argc, char **argv_orig, char **envp) {
 
   #endif
 
-  configure_afl_kill_signals(&afl->fsrv, afl->afl_env.afl_child_kill_signal,
-                             afl->afl_env.afl_fsrv_kill_signal,
-                             (afl->fsrv.qemu_mode || afl->unicorn_mode
+  configure_afl_kill_signals(
+      &afl->fsrv, afl->afl_env.afl_child_kill_signal,
+      afl->afl_env.afl_fsrv_kill_signal,
+      (afl->fsrv.qemu_mode || afl->unicorn_mode || afl->fsrv.use_fauxsrv
   #ifdef __linux__
-                              || afl->fsrv.nyx_mode
+       || afl->fsrv.nyx_mode
   #endif
-                              )
-                                 ? SIGKILL
-                                 : SIGTERM);
+       )
+          ? SIGKILL
+          : SIGTERM);
 
   setup_signal_handlers();
   check_asan_opts(afl);
@@ -1564,7 +1574,11 @@ int main(int argc, char **argv_orig, char **envp) {
 
   setenv("__AFL_OUT_DIR", afl->out_dir, 1);
 
-  if (get_afl_env("AFL_DISABLE_TRIM")) { afl->disable_trim = 1; }
+  if (get_afl_env("AFL_DISABLE_TRIM") || get_afl_env("AFL_NO_TRIM")) {
+
+    afl->disable_trim = 1;
+
+  }
 
   if (getenv("AFL_NO_UI") && getenv("AFL_FORCE_UI")) {
 
@@ -1800,6 +1814,7 @@ int main(int argc, char **argv_orig, char **envp) {
   afl_realloc(AFL_BUF_PARAM(ex), min_alloc);
 
   afl->fsrv.use_fauxsrv = afl->non_instrumented_mode == 1 || afl->no_forkserver;
+  afl->fsrv.max_length = afl->max_length;
 
   #ifdef __linux__
   if (!afl->fsrv.nyx_mode) {
@@ -2580,7 +2595,7 @@ int main(int argc, char **argv_orig, char **envp) {
                     (!afl->queue_cycle && afl->afl_env.afl_import_first)) &&
                    afl->sync_id)) {
 
-        if (!afl->queue_cycle && afl->afl_env.afl_import_first) {
+        if (unlikely(!afl->queue_cycle && afl->afl_env.afl_import_first)) {
 
           OKF("Syncing queues from other fuzzer instances first ...");
 
@@ -2588,16 +2603,15 @@ int main(int argc, char **argv_orig, char **envp) {
 
         sync_fuzzers(afl);
 
-        if (!afl->queue_cycle && afl->afl_env.afl_import_first) {
-
-          // real start time, we reset, so this works correctly with -V
-          afl->start_time = get_cur_time();
-
-        }
-
       }
 
       ++afl->queue_cycle;
+      if (afl->afl_env.afl_no_ui) {
+
+        ACTF("Entering queue cycle %llu\n", afl->queue_cycle);
+
+      }
+
       runs_in_current_cycle = (u32)-1;
       afl->cur_skipped_items = 0;
 
@@ -2606,7 +2620,7 @@ int main(int argc, char **argv_orig, char **envp) {
       // queue is fully cycled.
       time_t     cursec = time(NULL);
       struct tm *curdate = localtime(&cursec);
-      if (likely(!afl->afl_env.afl_pizza_mode)) {
+      if (unlikely(!afl->afl_env.afl_pizza_mode)) {
 
         if (unlikely(curdate->tm_mon == 3 && curdate->tm_mday == 1)) {
 
@@ -2648,13 +2662,6 @@ int main(int argc, char **argv_orig, char **envp) {
           seek_to = 0;
 
         }
-
-      }
-
-      if (unlikely(afl->not_on_tty)) {
-
-        ACTF("Entering queue cycle %llu.", afl->queue_cycle);
-        fflush(stdout);
 
       }
 
@@ -2943,26 +2950,13 @@ int main(int argc, char **argv_orig, char **envp) {
 
     if (likely(!afl->stop_soon && afl->sync_id)) {
 
-      if (likely(afl->skip_deterministic)) {
+      if (unlikely(afl->is_main_node)) {
 
-        if (unlikely(afl->is_main_node)) {
+        if (unlikely(cur_time > (afl->sync_time >> 1) + afl->last_sync_time)) {
 
-          if (unlikely(cur_time >
-                       (afl->sync_time >> 1) + afl->last_sync_time)) {
+          if (!(sync_interval_cnt++ % (SYNC_INTERVAL / 3))) {
 
-            if (!(sync_interval_cnt++ % (SYNC_INTERVAL / 3))) {
-
-              sync_fuzzers(afl);
-
-            }
-
-          }
-
-        } else {
-
-          if (unlikely(cur_time > afl->sync_time + afl->last_sync_time)) {
-
-            if (!(sync_interval_cnt++ % SYNC_INTERVAL)) { sync_fuzzers(afl); }
+            sync_fuzzers(afl);
 
           }
 
@@ -2970,7 +2964,11 @@ int main(int argc, char **argv_orig, char **envp) {
 
       } else {
 
-        sync_fuzzers(afl);
+        if (unlikely(cur_time > afl->sync_time + afl->last_sync_time)) {
+
+          if (!(sync_interval_cnt++ % SYNC_INTERVAL)) { sync_fuzzers(afl); }
+
+        }
 
       }
 

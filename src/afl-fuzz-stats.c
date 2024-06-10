@@ -5,8 +5,9 @@
    Originally written by Michal Zalewski
 
    Now maintained by Marc Heuse <mh@mh-sec.de>,
-                        Heiko Eißfeldt <heiko.eissfeldt@hexco.de> and
-                        Andrea Fioraldi <andreafioraldi@gmail.com>
+                     Dominik Meier <mail@dmnk.co>,
+                     Andrea Fioraldi <andreafioraldi@gmail.com>, and
+                     Heiko Eissfeldt <heiko.eissfeldt@hexco.de>
 
    Copyright 2016, 2017 Google Inc. All rights reserved.
    Copyright 2019-2024 AFLplusplus Project. All rights reserved.
@@ -206,6 +207,12 @@ void load_stats_file(afl_state_t *afl) {
 
       }
 
+      if (starts_with("cmplog_time", keystring)) {
+
+        afl->cmplog_time_us = strtoull(lptr, &nptr, 10) * 1000000;
+
+      }
+
       if (starts_with("trim_time", keystring)) {
 
         afl->trim_time_us = strtoull(lptr, &nptr, 10) * 1000000;
@@ -320,8 +327,11 @@ void write_stats_file(afl_state_t *afl, u32 t_bytes, double bitmap_cvg,
 #ifndef __HAIKU__
   if (getrusage(RUSAGE_CHILDREN, &rus)) { rus.ru_maxrss = 0; }
 #endif
-  u64 runtime = afl->prev_run_time + cur_time - afl->start_time;
-  if (!runtime) { runtime = 1; }
+  u64 runtime_ms = afl->prev_run_time + cur_time - afl->start_time;
+  u64 overhead_ms = (afl->calibration_time_us + afl->sync_time_us +
+                     afl->trim_time_us + afl->cmplog_time_us) /
+                    1000;
+  if (!runtime_ms) { runtime_ms = 1; }
 
   fprintf(
       f,
@@ -334,6 +344,7 @@ void write_stats_file(afl_state_t *afl, u32 t_bytes, double bitmap_cvg,
       "time_wo_finds     : %llu\n"
       "fuzz_time         : %llu\n"
       "calibration_time  : %llu\n"
+      "cmplog_time       : %llu\n"
       "sync_time         : %llu\n"
       "trim_time         : %llu\n"
       "execs_done        : %llu\n"
@@ -374,20 +385,18 @@ void write_stats_file(afl_state_t *afl, u32 t_bytes, double bitmap_cvg,
       "target_mode       : %s%s%s%s%s%s%s%s%s%s\n"
       "command_line      : %s\n",
       (afl->start_time /*- afl->prev_run_time*/) / 1000, cur_time / 1000,
-      runtime / 1000, (u32)getpid(),
+      runtime_ms / 1000, (u32)getpid(),
       afl->queue_cycle ? (afl->queue_cycle - 1) : 0, afl->cycles_wo_finds,
       afl->longest_find_time > cur_time - afl->last_find_time
           ? afl->longest_find_time / 1000
           : ((afl->start_time == 0 || afl->last_find_time == 0)
                  ? 0
                  : (cur_time - afl->last_find_time) / 1000),
-      (runtime -
-       (afl->calibration_time_us + afl->sync_time_us + afl->trim_time_us) /
-           1000) /
-          1000,
-      afl->calibration_time_us / 1000000, afl->sync_time_us / 1000000,
-      afl->trim_time_us / 1000000, afl->fsrv.total_execs,
-      afl->fsrv.total_execs / ((double)(runtime) / 1000),
+      (runtime_ms - MIN(runtime_ms, overhead_ms)) / 1000,
+      afl->calibration_time_us / 1000000, afl->cmplog_time_us / 1000000,
+      afl->sync_time_us / 1000000, afl->trim_time_us / 1000000,
+      afl->fsrv.total_execs,
+      afl->fsrv.total_execs / ((double)(runtime_ms) / 1000),
       afl->last_avg_execs_saved, afl->queued_items, afl->queued_favored,
       afl->queued_discovered, afl->queued_imported, afl->queued_variable,
       afl->max_depth, afl->current_entry, afl->pending_favored,
@@ -631,9 +640,10 @@ void show_stats_normal(afl_state_t *afl) {
 
   cur_ms = get_cur_time();
 
-  if (afl->most_time_key) {
+  if (afl->most_time_key && afl->queue_cycle) {
 
-    if (afl->most_time * 1000 < cur_ms - afl->start_time) {
+    if (afl->most_time * 1000 + afl->sync_time_us / 1000 <
+        cur_ms - afl->start_time) {
 
       afl->most_time_key = 2;
       afl->stop_soon = 2;
@@ -642,7 +652,7 @@ void show_stats_normal(afl_state_t *afl) {
 
   }
 
-  if (afl->most_execs_key == 1) {
+  if (afl->most_execs_key == 1 && afl->queue_cycle) {
 
     if (afl->most_execs <= afl->fsrv.total_execs) {
 
@@ -1330,7 +1340,9 @@ void show_stats_normal(afl_state_t *afl) {
 
     sprintf(tmp, "disabled, ");
 
-  } else if (unlikely(!afl->bytes_trim_out)) {
+  } else if (unlikely(!afl->bytes_trim_out ||
+
+                      afl->bytes_trim_in <= afl->bytes_trim_out)) {
 
     sprintf(tmp, "n/a, ");
 
@@ -1347,7 +1359,9 @@ void show_stats_normal(afl_state_t *afl) {
 
     strcat(tmp, "disabled");
 
-  } else if (unlikely(!afl->blocks_eff_total)) {
+  } else if (unlikely(!afl->blocks_eff_total ||
+
+                      afl->blocks_eff_select >= afl->blocks_eff_total)) {
 
     strcat(tmp, "n/a");
 
@@ -1461,9 +1475,10 @@ void show_stats_pizza(afl_state_t *afl) {
 
   cur_ms = get_cur_time();
 
-  if (afl->most_time_key) {
+  if (afl->most_time_key && afl->queue_cycle) {
 
-    if (afl->most_time * 1000 < cur_ms - afl->start_time) {
+    if (afl->most_time * 1000 + afl->sync_time_us / 1000 <
+        cur_ms - afl->start_time) {
 
       afl->most_time_key = 2;
       afl->stop_soon = 2;
@@ -1472,7 +1487,7 @@ void show_stats_pizza(afl_state_t *afl) {
 
   }
 
-  if (afl->most_execs_key == 1) {
+  if (afl->most_execs_key == 1 && afl->queue_cycle) {
 
     if (afl->most_execs <= afl->fsrv.total_execs) {
 
@@ -2481,7 +2496,7 @@ void show_init_stats(afl_state_t *afl) {
 
 }
 
-void update_calibration_time(afl_state_t *afl, u64 *time) {
+inline void update_calibration_time(afl_state_t *afl, u64 *time) {
 
   u64 cur = get_cur_time_us();
   afl->calibration_time_us += cur - *time;
@@ -2489,7 +2504,7 @@ void update_calibration_time(afl_state_t *afl, u64 *time) {
 
 }
 
-void update_trim_time(afl_state_t *afl, u64 *time) {
+inline void update_trim_time(afl_state_t *afl, u64 *time) {
 
   u64 cur = get_cur_time_us();
   afl->trim_time_us += cur - *time;
@@ -2497,10 +2512,18 @@ void update_trim_time(afl_state_t *afl, u64 *time) {
 
 }
 
-void update_sync_time(afl_state_t *afl, u64 *time) {
+inline void update_sync_time(afl_state_t *afl, u64 *time) {
 
   u64 cur = get_cur_time_us();
   afl->sync_time_us += cur - *time;
+  *time = cur;
+
+}
+
+inline void update_cmplog_time(afl_state_t *afl, u64 *time) {
+
+  u64 cur = get_cur_time_us();
+  afl->cmplog_time_us += cur - *time;
   *time = cur;
 
 }

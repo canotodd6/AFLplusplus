@@ -7,7 +7,7 @@
    Forkserver design by Jann Horn <jannhorn@googlemail.com>
 
    Now maintained by Marc Heuse <mh@mh-sec.de>,
-                     Heiko Eißfeldt <heiko.eissfeldt@hexco.de>,
+                     Heiko Eissfeldt <heiko.eissfeldt@hexco.de>,
                      Andrea Fioraldi <andreafioraldi@gmail.com>,
                      Dominik Maier <mail@dmnk.co>>
 
@@ -187,6 +187,8 @@ typedef struct afl_forkserver {
   u8 fsrv_kill_signal;
 
   u8 persistent_mode;
+
+  u32 max_length;
 
 #ifdef __linux__
   nyx_plugin_handler_t *nyx_handlers;

@@ -139,6 +139,10 @@
   #define AFL_RAND_RETURN u32
 #endif
 
+#ifndef INTERESTING_32_LEN
+  #error INTERESTING_32_LEN not defined - BUG!
+#endif
+
 extern s8  interesting_8[INTERESTING_8_LEN];
 extern s16 interesting_16[INTERESTING_8_LEN + INTERESTING_16_LEN];
 extern s32
@@ -452,7 +456,8 @@ typedef struct afl_env_vars {
       afl_keep_timeouts, afl_no_crash_readme, afl_ignore_timeouts,
       afl_no_startup_calibration, afl_no_warn_instability,
       afl_post_process_keep_original, afl_crashing_seeds_as_new_crash,
-      afl_final_sync, afl_ignore_seed_problems;
+      afl_final_sync, afl_ignore_seed_problems, afl_disable_redundant,
+      afl_sha1_filenames, afl_no_sync;
 
   u8 *afl_tmpdir, *afl_custom_mutator_library, *afl_python_module, *afl_path,
       *afl_hang_tmout, *afl_forksrv_init_tmout, *afl_preload,
@@ -651,6 +656,7 @@ typedef struct afl_state {
       switch_fuzz_mode,                 /* auto or fixed fuzz mode          */
       calibration_time_us,              /* Time spend on calibration        */
       sync_time_us,                     /* Time spend on sync               */
+      cmplog_time_us,                   /* Time spend on cmplog             */
       trim_time_us;                     /* Time spend on trimming           */
 
   u32 slowest_exec_ms,                  /* Slowest testcase non hang in ms  */
@@ -1221,6 +1227,7 @@ void show_init_stats(afl_state_t *);
 void update_calibration_time(afl_state_t *afl, u64 *time);
 void update_trim_time(afl_state_t *afl, u64 *time);
 void update_sync_time(afl_state_t *afl, u64 *time);
+void update_cmplog_time(afl_state_t *afl, u64 *time);
 
 /* StatsD */
 
@@ -1271,6 +1278,7 @@ void   get_core_count(afl_state_t *);
 void   fix_up_sync(afl_state_t *);
 void   check_asan_opts(afl_state_t *);
 void   check_binary(afl_state_t *, u8 *);
+u64    get_binary_hash(u8 *fn);
 void   check_if_tty(afl_state_t *);
 void   save_cmdline(afl_state_t *, u32, char **);
 void   read_foreign_testcases(afl_state_t *, int);
@@ -1403,6 +1411,32 @@ void queue_testcase_retake_mem(afl_state_t *afl, struct queue_entry *q, u8 *in,
 /* Add a new queue entry directly to the cache */
 
 void queue_testcase_store_mem(afl_state_t *afl, struct queue_entry *q, u8 *mem);
+
+/* Compute the SHA1 hash of `data`, which is of `len` bytes, and return the
+ * result as a `\0`-terminated hex string, which the caller much `ck_free`. */
+char *sha1_hex(const u8 *data, size_t len);
+
+/* Apply `sha1_hex` to the first `len` bytes of data of the file at `fname`. */
+char *sha1_hex_for_file(const char *fname, u32 len);
+
+/* Create file `fn`, but allow it to already exist if `AFL_SHA1_FILENAMES` is
+ * enabled. */
+static inline int permissive_create(afl_state_t *afl, const char *fn) {
+
+  int fd = open(fn, O_WRONLY | O_CREAT | O_EXCL, DEFAULT_PERMISSION);
+  if (unlikely(fd < 0)) {
+
+    if (!(afl->afl_env.afl_sha1_filenames && errno == EEXIST)) {
+
+      PFATAL("Unable to create '%s'", fn);
+
+    }
+
+  }
+
+  return fd;
+
+}
 
 #if TESTCASE_CACHE == 1
   #error define of TESTCASE_CACHE must be zero or larger than 1

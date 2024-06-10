@@ -5,7 +5,7 @@
    Originally written by Michal Zalewski
 
    Now maintained by Marc Heuse <mh@mh-sec.de>,
-                        Heiko Eißfeldt <heiko.eissfeldt@hexco.de> and
+                        Heiko Eissfeldt <heiko.eissfeldt@hexco.de> and
                         Andrea Fioraldi <andreafioraldi@gmail.com> and
                         Dominik Maier <mail@dmnk.co>
 
@@ -606,6 +606,8 @@ u8 calibrate_case(afl_state_t *afl, struct queue_entry *q, u8 *use_mem,
   }
 
   q->exec_us = diff_us / afl->stage_max;
+  if (unlikely(!q->exec_us)) { q->exec_us = 1; }
+
   q->bitmap_size = count_bytes(afl, afl->fsrv.trace_bits);
   q->handicap = handicap;
   q->cal_failed = 0;
@@ -663,6 +665,8 @@ abort_calibration:
 /* Grab interesting test cases from other fuzzers. */
 
 void sync_fuzzers(afl_state_t *afl) {
+
+  if (unlikely(afl->afl_env.afl_no_sync)) { return; }
 
   DIR           *sd;
   struct dirent *sd_ent;
@@ -771,6 +775,8 @@ void sync_fuzzers(afl_state_t *afl) {
     afl->stage_cur = 0;
     afl->stage_max = 0;
 
+    show_stats(afl);
+
     /* For every file queued by this fuzzer, parse ID and see if we have
        looked at it before; exec a test case if not. */
 
@@ -829,8 +835,8 @@ void sync_fuzzers(afl_state_t *afl) {
         if (afl->stop_soon) { goto close_sync; }
 
         afl->syncing_party = sd_ent->d_name;
-        afl->queued_imported +=
-            save_if_interesting(afl, mem, new_len, fault);
+        afl->queued_imported += save_if_interesting(afl, mem, new_len, fault);
+        show_stats(afl);
         afl->syncing_party = 0;
 
         munmap(mem, st.st_size);
@@ -1025,6 +1031,68 @@ u8 trim_case(afl_state_t *afl, struct queue_entry *q, u8 *in_buf) {
      version of the test case. */
 
   if (needs_write) {
+
+    // run afl_custom_post_process
+
+    if (unlikely(afl->custom_mutators_count) &&
+        likely(!afl->afl_env.afl_post_process_keep_original)) {
+
+      ssize_t new_size = q->len;
+      u8     *new_mem = in_buf;
+      u8     *new_buf = NULL;
+
+      LIST_FOREACH(&afl->custom_mutator_list, struct custom_mutator, {
+
+        if (el->afl_custom_post_process) {
+
+          new_size = el->afl_custom_post_process(el->data, new_mem, new_size,
+                                                 &new_buf);
+
+          if (unlikely(!new_buf || new_size <= 0)) {
+
+            new_size = 0;
+            new_buf = new_mem;
+
+          } else {
+
+            new_mem = new_buf;
+
+          }
+
+        }
+
+      });
+
+      if (unlikely(!new_size)) {
+
+        new_size = q->len;
+        new_mem = in_buf;
+
+      }
+
+      if (unlikely(new_size < afl->min_length)) {
+
+        new_size = afl->min_length;
+
+      } else if (unlikely(new_size > afl->max_length)) {
+
+        new_size = afl->max_length;
+
+      }
+
+      q->len = new_size;
+
+      if (new_mem != in_buf && new_mem != NULL) {
+
+        new_buf = afl_realloc(AFL_BUF_PARAM(out_scratch), new_size);
+        if (unlikely(!new_buf)) { PFATAL("alloc"); }
+        memcpy(new_buf, new_mem, new_size);
+
+        in_buf = new_buf;
+
+      }
+
+    }
 
     s32 fd;
 
